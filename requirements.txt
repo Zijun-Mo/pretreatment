@@ -1,0 +1,7 @@
+# 面部表情分析系统依赖包
+mediapipe>=0.10.0
+opencv-python>=4.5.0
+numpy>=1.21.0
+pillow>=8.0.0
+matplotlib>=3.3.0
+pathlib
