@@ -14,7 +14,7 @@ class Config:
     MODEL_PATH = r'C:\picture\face_landmarker_v2_with_blendshapes.task'
     
     # 默认输入输出目录
-    INPUT_DIR = r'C:\picture\input'
+    INPUT_DIR = r'C:\picture\第二批'
     OUTPUT_DIR = r'C:\picture\output'
     
     # 支持的视频格式
@@ -26,6 +26,9 @@ class Config:
     # 处理参数
     VISIBLE_THRESHOLD = 0.001
     PEAK_THRESHOLD = 0.9  # 峰值的90%作为阈值
+    
+    # 文件命名参数
+    FILE_ID_OFFSET = 20  # 患者序号加上此偏移量作为文件ID
     
     # 日志配置
     LOG_LEVEL = 'INFO'

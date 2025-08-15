@@ -26,16 +26,18 @@ class VideoProcessor:
         self.analysis_engine = FacialAnalysisEngine()
         self.expression_analyzer = ExpressionAnalyzer()
         self._init_mediapipe()
-        # 表情名称映射（英文）
+        # 表情名称映射（中文到英文）
+        self.expression_mapping = {
+            'action_raise_eyebrow': 'eyebrow_raise',
+            'action_close_eyes_soft': 'eye_close', 
+            'action_shrug_nose': 'nose_scrunch',
+            'action_bare_teeth': 'smile',
+            'action_pout': 'lip_pucker'
+        }
+        # 表情名称（英文）
         self.expression_keys = ['eyebrow_raise', 'eye_close', 'nose_scrunch', 'smile', 'lip_pucker']
-        # line_keys顺序与expression_keys一一对应，每个表情对应两个行号
-        self.line_keys = [
-            (9, 17),  # eyebrow_raise
-            (10, 18),  # eye_close
-            (11, 19),  # nose_scrunch
-            (12, 20),  # smile
-            (13, 21)   # lip_pucker
-        ]
+        # 表情名称（中文）用于显示
+        self.expression_names_zh = ['抬眉', '闭眼', '皱鼻', '咧嘴笑', '撅嘴']
     
     def _init_mediapipe(self):
         """初始化MediaPipe"""
@@ -44,50 +46,25 @@ class VideoProcessor:
         self.FaceLandmarkerOptions = mp.tasks.vision.FaceLandmarkerOptions
         self.VisionRunningMode = mp.tasks.vision.RunningMode
     
-    def process_single_video(self, video_path: str, output_dir: str) -> bool:
-        """处理单个视频文件"""
-        try:
-            video_name = Path(video_path).stem
-            output_dir = Path(output_dir)
-            output_dir.mkdir(parents=True, exist_ok=True)
-
-            print(f"处理视频: {video_name}")
-            
-            # 第一阶段：分析整个视频，找到基准帧和表情峰值帧
-            baseline_frame, expression_peaks = self._analyze_video_for_peaks(video_path)
-            
-            if not baseline_frame:
-                logging.error("未找到合适的基准帧")
-                return False
-            
-            if not expression_peaks:
-                logging.error("未找到表情峰值帧")
-                return False
-            
-            # 第二阶段：保存基准图和表情图片，并获取标注好的帧
-            self._save_baseline_and_expression_images(
-                video_path, baseline_frame, expression_peaks, output_dir, video_name)
-            return True
-            
-        except Exception as e:
-            logging.error(f"处理视频 {video_path} 时出错: {e}")
-            return False
+    def _get_expression_from_filename(self, filename: str) -> str:
+        """从文件名获取表情类型"""
+        for action_name, expression_key in self.expression_mapping.items():
+            if action_name in filename:
+                return expression_key
+        return None
     
-    def _analyze_video_for_peaks(self, video_path: str):
-        """分析整个视频，找到基准帧和表情峰值帧"""
-        # 阶段一：通过分析中性表情找到基准帧
-        print("第一阶段-A：初步分析视频，寻找基准帧...")
-
-        # 加载动作时间戳
-        video_name = Path(video_path).stem
-        json_path = Path(video_path).parent / f"{video_name}_action_timestamps.json"
-        if not json_path.exists():
-            logging.error(f"时间戳文件未找到: {json_path}")
-            return None, None
-        with open(json_path, 'r', encoding='utf-8') as f:
-            action_timestamps = json.load(f)['actions']
-
-        # 直接使用英文表情名，无需映射
+    def _get_patient_id_from_path(self, video_path: Path) -> str:
+        """从路径获取患者序号"""
+        # 从父目录名获取患者序号，如 "01", "02" 等
+        parent_name = video_path.parent.name
+        # 检查是否为数字格式
+        if parent_name.isdigit():
+            return parent_name
+        return None
+    
+    def _analyze_single_expression_video(self, video_path: str, expression_type: str):
+        """分析单个表情视频，第一帧作为基准帧，找到表情峰值帧"""
+        print(f"分析视频 {Path(video_path).name}，表情类型: {expression_type}")
         
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
@@ -104,7 +81,8 @@ class VideoProcessor:
             output_facial_transformation_matrixes=True,
             num_faces=1)
         
-        first_pass_data = []
+        baseline_frame = None
+        all_frames_data = []
         frame_count = 0
         
         with self.FaceLandmarker.create_from_options(options) as landmarker:
@@ -117,148 +95,99 @@ class VideoProcessor:
                 mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
                 timestamp_ms = int(frame_count * 1000 / fps)
                 timestamp_s = frame_count / fps
+                
                 detection_result = landmarker.detect_for_video(mp_image, timestamp_ms)
                 
                 if detection_result.face_blendshapes and detection_result.face_landmarks:
-                    # 检查当前帧是否在任何一个动作的时间范围内
-                    in_action_range = False
-                    for action in action_timestamps.values():
-                        if action['start_time'] <= timestamp_s <= action['end_time']:
-                            in_action_range = True
-                            break
-                    
-                    if in_action_range:
+                    # 第一帧作为基准帧
+                    if frame_count == 0:
                         expressions = self.expression_analyzer.analyze_expressions(detection_result)
-                        current_frame_info = {
+                        baseline_frame = {
                             'frame_number': frame_count,
                             'timestamp_ms': timestamp_ms,
                             'timestamp_s': timestamp_s,
                             'frame': frame.copy(),
                             'rgb_frame': rgb_frame.copy(),
                             'detection_result': detection_result,
-                            'expressions': expressions
+                            'expressions': expressions,
+                            'landmarks': detection_result.face_landmarks[0]
                         }
-                        first_pass_data.append(current_frame_info)
+                        print(f"基准帧已设置: 帧号 {frame_count} (中性值: {expressions['neutral']:.3f})")
+                    
+                    # 记录所有帧数据
+                    frame_info = {
+                        'frame_number': frame_count,
+                        'timestamp_ms': timestamp_ms,
+                        'timestamp_s': timestamp_s,
+                        'frame': frame.copy(),
+                        'rgb_frame': rgb_frame.copy(),
+                        'detection_result': detection_result
+                    }
+                    all_frames_data.append(frame_info)
                 
                 frame_count += 1
-                if frame_count % 100 == 0:
+                if frame_count % 50 == 0:
                     progress = (frame_count / total_frames) * 100
-                    print(f"初步分析进度: {progress:.1f}% ({frame_count}/{total_frames})")
+                    print(f"分析进度: {progress:.1f}% ({frame_count}/{total_frames})")
+        
         cap.release()
-
-        if not first_pass_data:
-            logging.error("在指定的时间戳范围内未能找到任何有效的帧。")
+        
+        if not baseline_frame or not all_frames_data:
+            logging.error("未能获取有效的帧数据")
             return None, None
-
-        # 在 neutral 时间范围内寻找基准帧
-        neutral_start_time = action_timestamps['neutral']['start_time']
-        neutral_end_time = action_timestamps['neutral']['end_time']
         
-        neutral_frames_data = [
-            f for f in first_pass_data 
-            if neutral_start_time <= f['timestamp_s'] <= neutral_end_time
-        ]
-
-        if not neutral_frames_data:
-            logging.error("在中性表情时间范围内未找到任何帧。")
-            return None, None
-
-        # 计算每帧的中性状态
-        neutral_values = [f['expressions']['neutral'] for f in neutral_frames_data]
-        timestamps = [f['timestamp_s'] for f in neutral_frames_data]
-        # 计算变化率（绝对值）
-        neutral_deltas = [0.0]
-        for i in range(1, len(neutral_values)):
-            dt = timestamps[i] - timestamps[i-1]
-            if dt > 0:
-                delta = abs((neutral_values[i] - neutral_values[i-1]) / dt)
-            else:
-                delta = 0.0
-            neutral_deltas.append(delta)
-        # 前缀和
-        prefix_sum = [0.0]
-        for d in neutral_deltas:
-            prefix_sum.append(prefix_sum[-1] + d)
-        # 滑窗平均
-        window_sec = 0.1
-        window_size = max(1, int(window_sec * fps))
-        min_avg = float('inf')
-        min_idx = 0
-        for i in range(len(neutral_deltas)):
-            l = max(0, i - window_size)
-            r = min(len(neutral_deltas)-1, i + window_size)
-            count = r - l + 1
-            avg = (prefix_sum[r+1] - prefix_sum[l]) / count
-            if avg < min_avg:
-                min_avg = avg
-                min_idx = i
+        # 使用基准帧地标重新分析所有帧的表情
+        print("使用基准帧重新分析表情...")
+        reference_landmarks = baseline_frame['landmarks']
         
-        baseline_frame_info = neutral_frames_data[min_idx].copy()
-        print(f"基准帧已找到: 帧号 {baseline_frame_info['frame_number']} (中性值: {baseline_frame_info['expressions']['neutral']:.3f}, 变化率窗口均值: {min_avg:.5f})")
+        max_expression_value = 0.0
+        peak_frames = []
         
-        # 阶段二：使用基准帧地标重新计算表情并找到峰值
-        print("第一阶段-B：使用基准帧重新分析表情并寻找峰值...")
-        reference_landmarks = baseline_frame_info['detection_result'].face_landmarks[0]
-        
-        final_frame_data = []
-        expression_peaks = {expr: {'max_value': 0.0, 'frames': [], 'frameID': 0} for expr in self.expression_keys}
-
-        for frame_info in first_pass_data:
-            reanalyzed_expressions = self.expression_analyzer.analyze_expressions(
+        for frame_info in all_frames_data:
+            # 重新分析表情
+            expressions = self.expression_analyzer.analyze_expressions(
                 frame_info['detection_result'], 
                 reference_landmarks=reference_landmarks
             )
+            frame_info['expressions'] = expressions
             
-            # 使用新的表情更新帧信息并进行清理
-            frame_info['expressions'] = reanalyzed_expressions
-            frame_info['landmarks'] = frame_info['detection_result'].face_landmarks[0]
-            frame_info['blendshapes'] = frame_info['detection_result'].face_blendshapes[0]
-            
-            final_frame_data.append(frame_info)
-            
-        # 使用新值更新表情峰值
-        for expr_key in self.expression_keys:
-            if expr_key in action_timestamps:
-                time_range = action_timestamps[expr_key]
-                for frame_info in final_frame_data:
-                    if time_range['start_time'] <= frame_info['timestamp_s'] <= time_range['end_time']:
-                        expr_value = frame_info['expressions'][expr_key]
-                        if expr_value > expression_peaks[expr_key]['max_value']:
-                            expression_peaks[expr_key]['max_value'] = expr_value
-                            expression_peaks[expr_key]['frameID'] = frame_info['frame_number']
+            # 查找目标表情的峰值
+            expr_value = expressions[expression_type]
+            if expr_value > max_expression_value:
+                max_expression_value = expr_value
         
-        # 找到每个表情峰值90%范围内的所有帧
-        print("寻找表情峰值90%的帧...")
-        for expr_key in self.expression_keys:
-            if expr_key in action_timestamps:
-                peak_value = expression_peaks[expr_key]['max_value']
-                threshold_90 = peak_value * Config.PEAK_THRESHOLD
-
-                print(f"{expr_key}: 帧号 = {expression_peaks[expr_key]['frameID']}, 峰值={peak_value:.3f}, 90%阈值={threshold_90:.3f}")
-
-                time_range = action_timestamps[expr_key]
-                qualifying_frames = []
-                for frame_info in final_frame_data:
-                    if (time_range['start_time'] <= frame_info['timestamp_s'] <= time_range['end_time'] and
-                            frame_info['expressions'][expr_key] >= threshold_90):
-                        qualifying_frames.append(frame_info)
-                
-                expression_peaks[expr_key]['frames'] = qualifying_frames
-                print(f"找到{len(qualifying_frames)}帧达到{expr_key}的90%峰值")
+        # 找到达到峰值90%的所有帧
+        threshold_90 = max_expression_value * Config.PEAK_THRESHOLD
+        print(f"{expression_type}: 峰值={max_expression_value:.3f}, 90%阈值={threshold_90:.3f}")
         
-        return baseline_frame_info, expression_peaks
+        for frame_info in all_frames_data:
+            expr_value = frame_info['expressions'][expression_type]
+            if expr_value >= threshold_90:
+                peak_frames.append(frame_info)
+        
+        print(f"找到 {len(peak_frames)} 帧达到 {expression_type} 的90%峰值")
+        
+        return baseline_frame, peak_frames
     
-    def _save_baseline_and_expression_images(self, video_path, baseline_frame, expression_peaks, output_dir, video_name):
-        """保存基准图和表情图片"""
-        print("第二阶段：保存基准图和表情图片...")
+    def _save_images_new_structure(self, video_path, baseline_frame, expression_peak_frames, 
+                                   output_dir, video_name, expression_type, patient_id, score_df):
+        """保存基准图和表情图片（新结构）"""
+        print(f"保存基准图和表情图片 - {expression_type}...")
+        
+        # 生成新的文件名：患者序号+配置的偏移量
+        new_file_id = str(int(patient_id) + Config.FILE_ID_OFFSET)
+        
         # 保存基准图
-        baseline_path = output_dir / f"{video_name}_baseline.jpg"
-        points_baseline_path = output_dir / f"{video_name}_baseline_points.jpg"
-        print(f"保存基准图: {baseline_path}")
-        roi_baseline_frame, points_baseline_frame = self.analysis_engine.process_frame_for_roi(baseline_frame['frame'], baseline_frame['detection_result'])
+        baseline_path = output_dir / f"{new_file_id}_baseline.jpg"
+        points_baseline_path = output_dir / f"{new_file_id}_baseline_points.jpg"
+        
+        roi_baseline_frame, points_baseline_frame = self.analysis_engine.process_frame_for_roi(
+            baseline_frame['frame'], baseline_frame['detection_result'])
+        
         if roi_baseline_frame is None:
             print("基准图ROI提取失败,无法保存")
             return
+        
         # 保存基准图（resize到112x112）
         if len(roi_baseline_frame.shape) == 3:
             rgb_image = cv2.cvtColor(roi_baseline_frame, cv2.COLOR_BGR2RGB)
@@ -268,118 +197,222 @@ class VideoProcessor:
         pil_image = Image.fromarray(rgb_image_112)
         pil_image.save(str(baseline_path), 'JPEG', quality=95)
         print(f"基准图已保存: {baseline_path}")
+        
         # 保存基准点图（resize到112x112）
         points_img_112 = cv2.resize(points_baseline_frame, (112, 112), interpolation=cv2.INTER_NEAREST)
         points_img = Image.fromarray(points_img_112)
         points_img.save(str(points_baseline_path), 'JPEG', quality=95)
         print(f"基准点图已保存: {points_baseline_path}")
-
+        
         print(f"基准图中性值: {baseline_frame['expressions']['neutral']:.3e}")
-
-        # 查找视频目录下的xlsx文件
-        video_dir = Path(video_path).parent
-        # 跳过以~$开头的临时/锁定xlsx文件
-        xlsx_files = [f for f in video_dir.glob('*.xlsx') if not f.name.startswith('~$')]
-        xlsx_df = None
-        if xlsx_files:
+        
+        # 保存表情图片
+        if not expression_peak_frames:
+            print(f"警告: {expression_type} 没有找到合适的帧")
+            return
+        
+        print(f"保存 {expression_type} 的 {len(expression_peak_frames)} 张图片...")
+        
+        for i, frame_info in enumerate(expression_peak_frames):
+            # 保存roi区域和点图
+            roi_frame, points_frame = self.analysis_engine.process_frame_for_roi(
+                frame_info['frame'], frame_info['detection_result'])
+            
+            img_dir = output_dir / f"{expression_type}" / f"{new_file_id}_{i+1:03d}"
+            img_path = img_dir / "facial_image.jpg"
+            points_img_path = img_dir / "facial_image_points.jpg"
+            
+            # 确保目录存在
+            img_dir.mkdir(parents=True, exist_ok=True)
+            
             try:
-                xlsx_df = pd.read_excel(xlsx_files[0], header=None)
+                # 光流计算
+                if roi_frame.shape[:2] != roi_baseline_frame.shape[:2]:
+                    roi_frame_resized = cv2.resize(roi_frame, (roi_baseline_frame.shape[1], roi_baseline_frame.shape[0]))
+                else:
+                    roi_frame_resized = roi_frame
+                
+                gray_base = cv2.cvtColor(roi_baseline_frame, cv2.COLOR_BGR2GRAY) if len(roi_baseline_frame.shape) == 3 else roi_baseline_frame
+                gray_cur = cv2.cvtColor(roi_frame_resized, cv2.COLOR_BGR2GRAY) if len(roi_frame_resized.shape) == 3 else roi_frame_resized
+                
+                # 计算光流
+                flow1 = cv2.calcOpticalFlowFarneback(gray_base, gray_cur, None, 0.5, 2, 9, 2, 5, 1.1, 0)
+                h, w = gray_base.shape
+                flow_map = np.zeros_like(flow1, dtype=np.float32)
+                for y in range(h):
+                    for x in range(w):
+                        flow_map[y, x, 0] = x + flow1[y, x, 0]
+                        flow_map[y, x, 1] = y + flow1[y, x, 1]
+                
+                # 配准
+                if len(roi_frame_resized.shape) == 3:
+                    cur_for_warp = roi_frame_resized
+                else:
+                    cur_for_warp = cv2.cvtColor(roi_frame_resized, cv2.COLOR_GRAY2BGR)
+                warped_cur = cv2.remap(cur_for_warp, flow_map[...,0], flow_map[...,1], 
+                                     interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+                
+                # 再次计算光流
+                gray_warped = cv2.cvtColor(warped_cur, cv2.COLOR_BGR2GRAY) if len(warped_cur.shape) == 3 else warped_cur
+                flow2 = cv2.calcOpticalFlowFarneback(gray_base, gray_warped, None, 0.5, 2, 9, 2, 5, 1.1, 0)
+                mag, ang = cv2.cartToPolar(flow2[...,0], flow2[...,1])
+                mag_norm = cv2.normalize(mag, None, 0, 255, cv2.NORM_MINMAX)
+                
+                hsv = np.zeros((gray_base.shape[0], gray_base.shape[1], 3), dtype=np.uint8)
+                hsv[...,0] = ang * 180 / np.pi / 2
+                hsv[...,1] = 255
+                hsv[...,2] = mag_norm.astype(np.uint8)
+                flow_bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+                flow_bgr_112 = cv2.resize(flow_bgr, (112, 112), interpolation=cv2.INTER_LINEAR)
+                optical_flow_path = img_dir / "optical_flow.jpg"
+                cv2.imwrite(str(optical_flow_path), flow_bgr_112)
+                
+                # 保存表情图和表情点图（resize到112x112）
+                rgb_image = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2RGB)
+                rgb_image_112 = cv2.resize(rgb_image, (112, 112), interpolation=cv2.INTER_LINEAR)
+                pil_image = Image.fromarray(rgb_image_112)
+                pil_image.save(str(img_path), 'JPEG', quality=95)
+                
+                points_img_112 = cv2.resize(points_frame, (112, 112), interpolation=cv2.INTER_NEAREST)
+                points_img = Image.fromarray(points_img_112)
+                points_img.save(str(points_img_path), 'JPEG', quality=95)
+                
+                # 保存基准图和基准点图到该目录
+                baseline_img_path = img_dir / "facial_image_baseline.jpg"
+                baseline_points_img_path = img_dir / "facial_image_baseline_points.jpg"
+                baseline_rgb = cv2.cvtColor(roi_baseline_frame, cv2.COLOR_BGR2RGB) if len(roi_baseline_frame.shape) == 3 else roi_baseline_frame
+                baseline_rgb_112 = cv2.resize(baseline_rgb, (112, 112), interpolation=cv2.INTER_LINEAR)
+                baseline_pil = Image.fromarray(baseline_rgb_112)
+                baseline_pil.save(str(baseline_img_path), 'JPEG', quality=95)
+                
+                baseline_points_112 = cv2.resize(points_baseline_frame, (112, 112), interpolation=cv2.INTER_NEAREST)
+                baseline_points_pil = Image.fromarray(baseline_points_112)
+                baseline_points_pil.save(str(baseline_points_img_path), 'JPEG', quality=95)
+                
+                # 保存评分信息
+                if score_df is not None:
+                    score_info = self._get_score_info(score_df, patient_id, expression_type)
+                    if score_info:
+                        score_json_path = img_dir / "expression_scores.json"
+                        with open(score_json_path, 'w', encoding='utf-8') as f:
+                            json.dump(score_info, f, ensure_ascii=False, indent=2)
+                
             except Exception as e:
-                print(f"读取xlsx失败: {e}")
-                xlsx_df = None
-        for expr_key in self.expression_keys:
-            expr_frames = expression_peaks[expr_key]['frames']
-            if not expr_frames:
-                print(f"警告: {expr_key} 没有找到合适的帧")
+                print(f"保存图片失败: {e}")
+                logging.error(f"保存图片失败: {img_path}, 错误: {e}")
                 continue
-            print(f"保存 {expr_key} 的 {len(expr_frames)} 张图片...")
-            for i, frame_info in enumerate(expr_frames):
-                # 保存roi区域和点图
-                roi_frame, points_frame = self.analysis_engine.process_frame_for_roi(frame_info['frame'], frame_info['detection_result'])
-                img_dir = output_dir / f"{expr_key}" / f"{video_name}_{i+1:03d}"
-                img_path = img_dir / "facial_image.jpg"
-                points_img_path = img_dir / "facial_image_points.jpg"
-                # 确保目录存在
-                img_dir.mkdir(parents=True, exist_ok=True)
-                # 使用PIL保存图片
-                try:
-                    # 光流对比（Farneback）
-                    # 先缩放到相同大小
-                    if roi_frame.shape[:2] != roi_baseline_frame.shape[:2]:
-                        roi_frame_resized = cv2.resize(roi_frame, (roi_baseline_frame.shape[1], roi_baseline_frame.shape[0]))
-                    else:
-                        roi_frame_resized = roi_frame
-                    gray_base = cv2.cvtColor(roi_baseline_frame, cv2.COLOR_BGR2GRAY) if len(roi_baseline_frame.shape) == 3 else roi_baseline_frame
-                    gray_cur = cv2.cvtColor(roi_frame_resized, cv2.COLOR_BGR2GRAY) if len(roi_frame_resized.shape) == 3 else roi_frame_resized
-                    # 第一步：用光流将当前帧配准到基准帧
-                    flow1 = cv2.calcOpticalFlowFarneback(gray_base, gray_cur, None, 0.5, 2, 9, 2, 5, 1.1, 0)
-                    h, w = gray_base.shape
-                    flow_map = np.zeros_like(flow1, dtype=np.float32)
-                    for y in range(h):
-                        for x in range(w):
-                            flow_map[y, x, 0] = x + flow1[y, x, 0]
-                            flow_map[y, x, 1] = y + flow1[y, x, 1]
-                    # 用flow_map将当前帧配准到基准帧
-                    if len(roi_frame_resized.shape) == 3:
-                        cur_for_warp = roi_frame_resized
-                    else:
-                        cur_for_warp = cv2.cvtColor(roi_frame_resized, cv2.COLOR_GRAY2BGR)
-                    warped_cur = cv2.remap(cur_for_warp, flow_map[...,0], flow_map[...,1], interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
-                    # 第二步：用配准后的帧与基准帧再计算光流
-                    gray_warped = cv2.cvtColor(warped_cur, cv2.COLOR_BGR2GRAY) if len(warped_cur.shape) == 3 else warped_cur
-                    flow2 = cv2.calcOpticalFlowFarneback(gray_base, gray_warped, None, 0.5, 2, 9, 2, 5, 1.1, 0)
-                    mag, ang = cv2.cartToPolar(flow2[...,0], flow2[...,1])
-                    mag_norm = cv2.normalize(mag, None, 0, 255, cv2.NORM_MINMAX)
-                    hsv = np.zeros((gray_base.shape[0], gray_base.shape[1], 3), dtype=np.uint8)
-                    hsv[...,0] = ang * 180 / np.pi / 2
-                    hsv[...,1] = 255
-                    hsv[...,2] = mag_norm.astype(np.uint8)
-                    flow_bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
-                    flow_bgr_112 = cv2.resize(flow_bgr, (112, 112), interpolation=cv2.INTER_LINEAR)
-                    optical_flow_path = img_dir / "optical_flow.jpg"
-                    cv2.imwrite(str(optical_flow_path), flow_bgr_112)
-                    # 保存表情图和表情点图（resize到112x112）
-                    rgb_image = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2RGB)
-                    rgb_image_112 = cv2.resize(rgb_image, (112, 112), interpolation=cv2.INTER_LINEAR)
-                    pil_image = Image.fromarray(rgb_image_112)
-                    pil_image.save(str(img_path), 'JPEG', quality=95)
-                    points_img_112 = cv2.resize(points_frame, (112, 112), interpolation=cv2.INTER_NEAREST)
-                    points_img = Image.fromarray(points_img_112)
-                    points_img.save(str(points_img_path), 'JPEG', quality=95)
-                    # 保存基准图和基准点图到该目录（resize到112x112）
-                    baseline_img_path = img_dir / "facial_image_baseline.jpg"
-                    baseline_points_img_path = img_dir / "facial_image_baseline_points.jpg"
-                    baseline_rgb = cv2.cvtColor(roi_baseline_frame, cv2.COLOR_BGR2RGB) if len(roi_baseline_frame.shape) == 3 else roi_baseline_frame
-                    baseline_rgb_112 = cv2.resize(baseline_rgb, (112, 112), interpolation=cv2.INTER_LINEAR)
-                    baseline_pil = Image.fromarray(baseline_rgb_112)
-                    baseline_pil.save(str(baseline_img_path), 'JPEG', quality=95)
-                    baseline_points_112 = cv2.resize(points_baseline_frame, (112, 112), interpolation=cv2.INTER_NEAREST)
-                    baseline_points_pil = Image.fromarray(baseline_points_112)
-                    baseline_points_pil.save(str(baseline_points_img_path), 'JPEG', quality=95)
-                    # 保存xlsx文件line_keys行G列（每个表情保存对应的两行G列为json）
-                    if xlsx_df is not None:
-                        expr_idx = self.expression_keys.index(expr_key)
-                        row1, row2 = self.line_keys[expr_idx]
-                        g_dict = {}
-                        try:
-                            g_val = xlsx_df.iloc[row1, 6]  # G列
-                        except Exception as e:
-                            g_val = None
-                        g_dict['dynamics'] = g_val
-                        try:
-                            g_val = xlsx_df.iloc[row2, 6]  # G列
-                        except Exception as e:
-                            g_val = None
-                        g_dict['synkinesis'] = g_val
-                        g_json_path = img_dir / "expression_g_column.json"
-                        try:
-                            with open(g_json_path, 'w', encoding='utf-8') as f:
-                                json.dump(g_dict, f, ensure_ascii=False, indent=2)
-                        except Exception as e:
-                            print(f"保存G列json失败: {e}")
-                except Exception as e:
-                    print(f"保存图片失败: {e}")
-                    logging.error(f"保存图片失败: {img_path}, 错误: {e}")
-                    continue
-            print(f"{expr_key} 图片保存完成，共 {len(expr_frames)} 张")
-        return
+        
+        print(f"{expression_type} 图片保存完成，共 {len(expression_peak_frames)} 张")
+    
+    def _get_score_info(self, score_df: pd.DataFrame, patient_id: str, expression_type: str) -> dict:
+        """从评分表格中获取对应的评分信息"""
+        try:
+            import pandas as pd
+            import numpy as np
+            
+            # 将patient_id转换为整数用于匹配
+            patient_num = int(patient_id)
+            
+            # 表情类型到列索引的映射
+            expression_col_mapping = {
+                'eyebrow_raise': {'dynamic': 4, 'synkinesis': 10},  # 抬眉：动态第5列，联动第11列
+                'eye_close': {'dynamic': 5, 'synkinesis': 11},     # 轻闭眼：动态第6列，联动第12列
+                'nose_scrunch': {'dynamic': 6, 'synkinesis': 12},  # 皱鼻：动态第7列，联动第13列
+                'smile': {'dynamic': 7, 'synkinesis': 13},         # 咧嘴笑：动态第8列，联动第14列
+                'lip_pucker': {'dynamic': 8, 'synkinesis': 14}     # 撅嘴：动态第9列，联动第15列
+            }
+            
+            if expression_type not in expression_col_mapping:
+                return None
+            
+            # 找到对应行（患者序号在第1列，索引为0）
+            patient_row = None
+            for idx, row in score_df.iterrows():
+                # 处理可能的NaN值
+                first_val = row.iloc[0]
+                if pd.notna(first_val):  # 检查不是NaN
+                    try:
+                        if int(float(first_val)) == patient_num:  # 先转为float再转为int
+                            patient_row = row
+                            break
+                    except (ValueError, TypeError):
+                        continue
+            
+            if patient_row is None:
+                print(f"未找到患者 {patient_id} 的评分信息")
+                return None
+            
+            cols = expression_col_mapping[expression_type]
+            
+            # 安全获取评分值，处理NaN
+            def safe_get_score(row, col_idx):
+                if col_idx < len(row):
+                    val = row.iloc[col_idx]
+                    if pd.notna(val):  # 不是NaN
+                        return val
+                return None
+            
+            score_info = {
+                'patient_id': patient_id,
+                'expression_type': expression_type,
+                'expression_name_zh': self.expression_names_zh[self.expression_keys.index(expression_type)],
+                'dynamic_score': safe_get_score(patient_row, cols['dynamic']),
+                'synkinesis_score': safe_get_score(patient_row, cols['synkinesis']),
+                'static_eye': safe_get_score(patient_row, 1),
+                'static_nasolabial': safe_get_score(patient_row, 2), 
+                'static_mouth': safe_get_score(patient_row, 3)
+            }
+            
+            return score_info
+            
+        except Exception as e:
+            print(f"获取评分信息失败: {e}")
+            return None
+    
+    def process_single_video(self, video_path: str, output_dir: str, score_df: pd.DataFrame = None) -> bool:
+        """处理单个视频文件（新结构：每个视频对应一个表情动作）"""
+        try:
+            video_path_obj = Path(video_path)
+            video_name = video_path_obj.stem
+            output_dir = Path(output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            print(f"处理视频: {video_name}")
+            
+            # 从文件名确定表情类型
+            expression_type = self._get_expression_from_filename(video_name)
+            if not expression_type:
+                logging.error(f"无法从文件名 {video_name} 确定表情类型")
+                return False
+            
+            print(f"检测到表情类型: {expression_type}")
+            
+            # 获取患者序号
+            patient_id = self._get_patient_id_from_path(video_path_obj)
+            if not patient_id:
+                logging.error(f"无法从路径 {video_path} 确定患者序号")
+                return False
+            
+            print(f"患者序号: {patient_id}")
+            
+            # 分析视频：第一帧作为基准帧，找到表情峰值帧
+            baseline_frame, expression_peak_frames = self._analyze_single_expression_video(video_path, expression_type)
+            
+            if not baseline_frame:
+                logging.error("未找到合适的基准帧")
+                return False
+            
+            if not expression_peak_frames:
+                logging.error("未找到表情峰值帧")
+                return False
+            
+            # 保存基准图和表情图片
+            self._save_images_new_structure(
+                video_path, baseline_frame, expression_peak_frames, 
+                output_dir, video_name, expression_type, patient_id, score_df)
+            
+            return True
+            
+        except Exception as e:
+            logging.error(f"处理视频 {video_path} 时出错: {e}")
+            return False

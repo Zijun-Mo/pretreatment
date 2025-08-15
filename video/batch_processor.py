@@ -4,7 +4,7 @@
 """
 
 from pathlib import Path
-from typing import Set
+import pandas as pd
 from video.video_processor import VideoProcessor
 
 
@@ -22,28 +22,86 @@ class BatchProcessor:
         
         # 创建输出目录
         output_path.mkdir(parents=True, exist_ok=True)
-          # 查找所有视频文件（避免重复）
-        video_files = set()  # 使用set避免重复
-        for ext in self.video_extensions:
-            # 同时递归搜索小写和大写扩展名
-            video_files.update(input_path.glob(f"**/*{ext}"))
-            video_files.update(input_path.glob(f"**/*{ext.upper()}"))
         
-        video_files = list(video_files)  # 转换回list
+        # 查找总评分表格文件
+        score_df = self._load_score_table(input_path)
         
-        if not video_files:
-            print(f"在目录 {input_dir} 中未找到视频文件")
+        # 查找所有患者文件夹
+        patient_folders = [f for f in input_path.iterdir() if f.is_dir() and f.name.isdigit()]
+        patient_folders.sort(key=lambda x: int(x.name))
+        
+        if not patient_folders:
+            print(f"在目录 {input_dir} 中未找到患者文件夹")
             return
         
-        print(f"找到 {len(video_files)} 个视频文件")
+        print(f"找到 {len(patient_folders)} 个患者文件夹")
         
-        # 处理每个视频
+        total_videos = 0
         success_count = 0
-        for i, video_file in enumerate(video_files, 1):
-            print(f"\n[{i}/{len(video_files)}] 开始处理: {video_file.name}")
+        
+        # 处理每个患者文件夹
+        for patient_folder in patient_folders:
+            print(f"\n处理患者文件夹: {patient_folder.name}")
             
-            if self.video_processor.process_single_video(str(video_file), output_dir):
-                success_count += 1
+            # 查找该患者文件夹下的所有视频
+            video_files = set()
+            for ext in self.video_extensions:
+                video_files.update(patient_folder.glob(f"*{ext}"))
+                video_files.update(patient_folder.glob(f"*{ext.upper()}"))
+            
+            video_files = list(video_files)
+            
+            if not video_files:
+                print(f"  患者 {patient_folder.name} 文件夹中未找到视频文件")
+                continue
+            
+            print(f"  找到 {len(video_files)} 个视频文件")
+            
+            # 处理该患者的每个视频
+            for video_file in video_files:
+                total_videos += 1
+                print(f"  [{total_videos}] 开始处理: {video_file.name}")
+                
+                try:
+                    if self.video_processor.process_single_video(
+                        str(video_file), str(output_path), score_df):
+                        success_count += 1
+                        print(f"    成功处理: {video_file.name}")
+                    else:
+                        print(f"    处理失败: {video_file.name}")
+                except Exception as e:
+                    print(f"    处理出错: {video_file.name} - {e}")
         
         print(f"\n批量处理完成！")
-        print(f"成功处理: {success_count}/{len(video_files)} 个视频")
+        print(f"成功处理: {success_count}/{total_videos} 个视频")
+    
+    def _load_score_table(self, input_path: Path) -> pd.DataFrame:
+        """加载评分表格"""
+        # 查找xlsx或xls文件
+        score_files = []
+        for ext in ['*.xlsx', '*.xls']:
+            score_files.extend(input_path.glob(ext))
+        
+        # 过滤掉临时文件
+        score_files = [f for f in score_files if not f.name.startswith('~$')]
+        
+        if not score_files:
+            print("警告: 未找到评分表格文件")
+            return None
+        
+        score_file = score_files[0]
+        print(f"加载评分表格: {score_file.name}")
+        
+        try:
+            df = pd.read_excel(score_file, header=0)
+            print(f"成功加载评分表格，共 {len(df)} 行数据")
+            return df
+        except Exception as e:
+            print(f"读取评分表格失败: {e}")
+            try:
+                df = pd.read_excel(score_file, header=None)
+                print(f"成功加载评分表格(无标题)，共 {len(df)} 行数据")
+                return df
+            except Exception as e2:
+                print(f"读取评分表格失败: {e2}")
+                return None
