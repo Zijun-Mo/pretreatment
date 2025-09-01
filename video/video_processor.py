@@ -38,6 +38,8 @@ class VideoProcessor:
         self.expression_keys = ['eyebrow_raise', 'eye_close', 'nose_scrunch', 'smile', 'lip_pucker']
         # 表情名称（中文）用于显示
         self.expression_names_zh = ['抬眉', '闭眼', '皱鼻', '咧嘴笑', '撅嘴']
+        # 表情对应的Excel行索引
+        self.line_keys = [(1, 7), (2, 8), (3, 9), (4, 10), (5, 11)]
     
     def _init_mediapipe(self):
         """初始化MediaPipe"""
@@ -291,11 +293,25 @@ class VideoProcessor:
                 
                 # 保存评分信息
                 if score_df is not None:
-                    score_info = self._get_score_info(score_df, patient_id, expression_type)
-                    if score_info:
-                        score_json_path = img_dir / "expression_scores.json"
-                        with open(score_json_path, 'w', encoding='utf-8') as f:
-                            json.dump(score_info, f, ensure_ascii=False, indent=2)
+                    expr_idx = self.expression_keys.index(expression_type)
+                    row1, row2 = self.line_keys[expr_idx]
+                    g_dict = {}
+                    try:
+                        g_val = score_df.iloc[row1, 6]  # G列
+                    except Exception as e:
+                        g_val = None
+                    g_dict['dynamics'] = g_val
+                    try:
+                        g_val = score_df.iloc[row2, 6]  # G列
+                    except Exception as e:
+                        g_val = None
+                    g_dict['synkinesis'] = g_val
+                    g_json_path = img_dir / "expression_g_column.json"
+                    try:
+                        with open(g_json_path, 'w', encoding='utf-8') as f:
+                            json.dump(g_dict, f, ensure_ascii=False, indent=2)
+                    except Exception as e:
+                        print(f"保存G列json失败: {e}")
                 
             except Exception as e:
                 print(f"保存图片失败: {e}")
@@ -303,71 +319,6 @@ class VideoProcessor:
                 continue
         
         print(f"{expression_type} 图片保存完成，共 {len(expression_peak_frames)} 张")
-    
-    def _get_score_info(self, score_df: pd.DataFrame, patient_id: str, expression_type: str) -> dict:
-        """从评分表格中获取对应的评分信息"""
-        try:
-            import pandas as pd
-            import numpy as np
-            
-            # 将patient_id转换为整数用于匹配
-            patient_num = int(patient_id)
-            
-            # 表情类型到列索引的映射
-            expression_col_mapping = {
-                'eyebrow_raise': {'dynamic': 4, 'synkinesis': 10},  # 抬眉：动态第5列，联动第11列
-                'eye_close': {'dynamic': 5, 'synkinesis': 11},     # 轻闭眼：动态第6列，联动第12列
-                'nose_scrunch': {'dynamic': 6, 'synkinesis': 12},  # 皱鼻：动态第7列，联动第13列
-                'smile': {'dynamic': 7, 'synkinesis': 13},         # 咧嘴笑：动态第8列，联动第14列
-                'lip_pucker': {'dynamic': 8, 'synkinesis': 14}     # 撅嘴：动态第9列，联动第15列
-            }
-            
-            if expression_type not in expression_col_mapping:
-                return None
-            
-            # 找到对应行（患者序号在第1列，索引为0）
-            patient_row = None
-            for idx, row in score_df.iterrows():
-                # 处理可能的NaN值
-                first_val = row.iloc[0]
-                if pd.notna(first_val):  # 检查不是NaN
-                    try:
-                        if int(float(first_val)) == patient_num:  # 先转为float再转为int
-                            patient_row = row
-                            break
-                    except (ValueError, TypeError):
-                        continue
-            
-            if patient_row is None:
-                print(f"未找到患者 {patient_id} 的评分信息")
-                return None
-            
-            cols = expression_col_mapping[expression_type]
-            
-            # 安全获取评分值，处理NaN
-            def safe_get_score(row, col_idx):
-                if col_idx < len(row):
-                    val = row.iloc[col_idx]
-                    if pd.notna(val):  # 不是NaN
-                        return val
-                return None
-            
-            score_info = {
-                'patient_id': patient_id,
-                'expression_type': expression_type,
-                'expression_name_zh': self.expression_names_zh[self.expression_keys.index(expression_type)],
-                'dynamic_score': safe_get_score(patient_row, cols['dynamic']),
-                'synkinesis_score': safe_get_score(patient_row, cols['synkinesis']),
-                'static_eye': safe_get_score(patient_row, 1),
-                'static_nasolabial': safe_get_score(patient_row, 2), 
-                'static_mouth': safe_get_score(patient_row, 3)
-            }
-            
-            return score_info
-            
-        except Exception as e:
-            print(f"获取评分信息失败: {e}")
-            return None
     
     def process_single_video(self, video_path: str, output_dir: str, score_df: pd.DataFrame = None) -> bool:
         """处理单个视频文件（新结构：每个视频对应一个表情动作）"""
