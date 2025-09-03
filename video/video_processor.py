@@ -38,8 +38,14 @@ class VideoProcessor:
         self.expression_keys = ['eyebrow_raise', 'eye_close', 'nose_scrunch', 'smile', 'lip_pucker']
         # 表情名称（中文）用于显示
         self.expression_names_zh = ['抬眉', '闭眼', '皱鼻', '咧嘴笑', '撅嘴']
-        # 表情对应的Excel行索引
-        self.line_keys = [(1, 7), (2, 8), (3, 9), (4, 10), (5, 11)]
+        # 表情对应的Excel列索引 (动态列, 联动列)
+        self.expression_col_mapping = {
+            'eyebrow_raise': {'dynamic': 5, 'synkinesis': 11},   # 抬眉：动态E列(5)，联动K列(11)
+            'eye_close': {'dynamic': 6, 'synkinesis': 12},       # 轻闭眼：动态F列(6)，联动L列(12)
+            'nose_scrunch': {'dynamic': 7, 'synkinesis': 13},    # 皱鼻：动态G列(7)，联动M列(13)
+            'smile': {'dynamic': 8, 'synkinesis': 14},           # 咧嘴笑：动态H列(8)，联动N列(14)
+            'lip_pucker': {'dynamic': 9, 'synkinesis': 15}       # 撅嘴：动态I列(9)，联动O列(15)
+        }
     
     def _init_mediapipe(self):
         """初始化MediaPipe"""
@@ -293,19 +299,38 @@ class VideoProcessor:
                 
                 # 保存评分信息
                 if score_df is not None:
-                    expr_idx = self.expression_keys.index(expression_type)
-                    row1, row2 = self.line_keys[expr_idx]
+                    cols = self.expression_col_mapping[expression_type]
                     g_dict = {}
-                    try:
-                        g_val = score_df.iloc[row1, 6]  # G列
-                    except Exception as e:
-                        g_val = None
-                    g_dict['dynamics'] = g_val
-                    try:
-                        g_val = score_df.iloc[row2, 6]  # G列
-                    except Exception as e:
-                        g_val = None
-                    g_dict['synkinesis'] = g_val
+                    
+                    # 查找患者对应的行（患者序号在第1列，从第3行开始是数据）
+                    patient_row_idx = None
+                    patient_num = int(patient_id)
+                    
+                    for idx in range(1, len(score_df)):  # 从第3行开始查找（跳过表头）
+                        try:
+                            if pd.notna(score_df.iloc[idx, 0]) and int(score_df.iloc[idx, 0]) == patient_num:
+                                patient_row_idx = idx
+                                break
+                        except (ValueError, TypeError):
+                            continue
+                    
+                    if patient_row_idx is not None:
+                        try:
+                            g_val = score_df.iloc[patient_row_idx, cols['dynamic']]  # 动态评分列
+                        except Exception as e:
+                            g_val = None
+                        g_dict['dynamics'] = g_val
+                        
+                        try:
+                            g_val = score_df.iloc[patient_row_idx, cols['synkinesis']]  # 联动评分列
+                        except Exception as e:
+                            g_val = None
+                        g_dict['synkinesis'] = g_val
+                    else:
+                        print(f"未找到患者{patient_id}的评分数据")
+                        g_dict['dynamics'] = None
+                        g_dict['synkinesis'] = None
+                    
                     g_json_path = img_dir / "expression_g_column.json"
                     try:
                         with open(g_json_path, 'w', encoding='utf-8') as f:
