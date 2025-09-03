@@ -57,20 +57,21 @@ class BatchProcessor:
             
             print(f"  找到 {len(video_files)} 个视频文件")
             
-            # 处理该患者的每个视频
-            for video_file in video_files:
-                total_videos += 1
-                print(f"  [{total_videos}] 开始处理: {video_file.name}")
-                
-                try:
-                    if self.video_processor.process_single_video(
-                        str(video_file), str(output_path), score_df):
-                        success_count += 1
-                        print(f"    成功处理: {video_file.name}")
-                    else:
-                        print(f"    处理失败: {video_file.name}")
-                except Exception as e:
-                    print(f"    处理出错: {video_file.name} - {e}")
+            # 使用新的统一基准帧方法处理该患者的所有视频
+            video_paths = [str(video_file) for video_file in video_files]
+            total_videos += len(video_files)
+            
+            print(f"  开始处理患者 {patient_folder.name} 的 {len(video_files)} 个视频（使用统一基准帧）")
+            
+            try:
+                if self.video_processor.process_patient_videos(
+                    video_paths, str(output_path), score_df):
+                    success_count += len(video_files)
+                    print(f"    成功处理患者 {patient_folder.name} 的所有视频")
+                else:
+                    print(f"    处理失败: 患者 {patient_folder.name}")
+            except Exception as e:
+                print(f"    处理出错: 患者 {patient_folder.name} - {e}")
         
         print(f"\n批量处理完成！")
         print(f"成功处理: {success_count}/{total_videos} 个视频")

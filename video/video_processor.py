@@ -70,8 +70,8 @@ class VideoProcessor:
             return parent_name
         return None
     
-    def _analyze_single_expression_video(self, video_path: str, expression_type: str):
-        """分析单个表情视频，第一帧作为基准帧，找到表情峰值帧"""
+    def _analyze_single_expression_video(self, video_path: str, expression_type: str, baseline_frame: Optional[Dict] = None):
+        """分析单个表情视频，使用统一的基准帧或第一帧作为基准帧，找到表情峰值帧"""
         print(f"分析视频 {Path(video_path).name}，表情类型: {expression_type}")
         
         cap = cv2.VideoCapture(video_path)
@@ -89,7 +89,6 @@ class VideoProcessor:
             output_facial_transformation_matrixes=True,
             num_faces=1)
         
-        baseline_frame = None
         all_frames_data = []
         frame_count = 0
         
@@ -107,8 +106,8 @@ class VideoProcessor:
                 detection_result = landmarker.detect_for_video(mp_image, timestamp_ms)
                 
                 if detection_result.face_blendshapes and detection_result.face_landmarks:
-                    # 第一帧作为基准帧
-                    if frame_count == 0:
+                    # 如果没有提供基准帧，使用第一帧作为基准帧
+                    if baseline_frame is None and frame_count == 0:
                         expressions = self.expression_analyzer.analyze_expressions(detection_result)
                         baseline_frame = {
                             'frame_number': frame_count,
@@ -176,6 +175,164 @@ class VideoProcessor:
         print(f"找到 {len(peak_frames)} 帧达到 {expression_type} 的90%峰值")
         
         return baseline_frame, peak_frames
+    
+    def _select_unified_baseline_frame(self, video_paths: List[str]) -> Optional[Dict]:
+        """
+        从多个表情视频的第一帧中选择统一的基准帧
+        选择5种表情值平均最低的第一帧作为基准帧
+        """
+        print("开始选择统一基准帧...")
+        
+        candidate_frames = []
+        current_timestamp = 0
+        
+        for video_path in video_paths:
+            print(f"提取视频第一帧: {Path(video_path).name}")
+            
+            # 为每个视频创建独立的landmarker实例
+            options = self.FaceLandmarkerOptions(
+                base_options=self.BaseOptions(model_asset_path=self.model_path),
+                running_mode=self.VisionRunningMode.VIDEO,
+                output_face_blendshapes=True,
+                output_facial_transformation_matrixes=True,
+                num_faces=1)
+            
+            with self.FaceLandmarker.create_from_options(options) as landmarker:
+                cap = cv2.VideoCapture(video_path)
+                if not cap.isOpened():
+                    logging.warning(f"无法打开视频文件 {video_path}")
+                    continue
+                
+                fps = cap.get(cv2.CAP_PROP_FPS)
+                
+                # 读取第一帧
+                ret, frame = cap.read()
+                if not ret:
+                    logging.warning(f"无法读取视频第一帧: {video_path}")
+                    cap.release()
+                    continue
+                
+                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+                timestamp_ms = 0  # 每个视频都从0开始
+                
+                detection_result = landmarker.detect_for_video(mp_image, timestamp_ms)
+                
+                if detection_result.face_blendshapes and detection_result.face_landmarks:
+                    # 分析表情
+                    expressions = self.expression_analyzer.analyze_expressions(detection_result)
+                    
+                    # 计算5种表情值的平均
+                    expr_values = [expressions[key] for key in self.expression_keys]
+                    avg_expression = sum(expr_values) / len(expr_values)
+                    
+                    candidate_frame = {
+                        'video_path': video_path,
+                        'frame_number': 0,
+                        'timestamp_ms': 0,
+                        'timestamp_s': 0.0,
+                        'frame': frame.copy(),
+                        'rgb_frame': rgb_frame.copy(),
+                        'detection_result': detection_result,
+                        'expressions': expressions,
+                        'landmarks': detection_result.face_landmarks[0],
+                        'avg_expression': avg_expression
+                    }
+                    
+                    candidate_frames.append(candidate_frame)
+                    print(f"  表情值: {expressions}")
+                    print(f"  平均表情值: {avg_expression:.4f}")
+                
+                cap.release()
+        
+        if not candidate_frames:
+            logging.error("没有找到有效的候选基准帧")
+            return None
+        
+        # 选择平均表情值最低的帧作为基准帧
+        baseline_frame = min(candidate_frames, key=lambda x: x['avg_expression'])
+        
+        print(f"选择统一基准帧: {Path(baseline_frame['video_path']).name}")
+        print(f"基准帧平均表情值: {baseline_frame['avg_expression']:.4f}")
+        print(f"基准帧表情值: {baseline_frame['expressions']}")
+        
+        return baseline_frame
+    
+    def process_patient_videos(self, video_paths: List[str], output_dir: str, score_df: pd.DataFrame = None) -> bool:
+        """
+        处理一个患者的所有表情视频（使用统一基准帧）
+        
+        Args:
+            video_paths: 该患者的所有表情视频路径列表
+            output_dir: 输出目录
+            score_df: 评分数据框
+        """
+        try:
+            if not video_paths:
+                logging.error("视频路径列表为空")
+                return False
+            
+            print(f"开始处理患者的 {len(video_paths)} 个表情视频...")
+            
+            # 选择统一的基准帧
+            unified_baseline_frame = self._select_unified_baseline_frame(video_paths)
+            if not unified_baseline_frame:
+                logging.error("无法选择统一的基准帧")
+                return False
+            
+            # 获取患者序号（从第一个视频路径获取）
+            patient_id = self._get_patient_id_from_path(Path(video_paths[0]))
+            if not patient_id:
+                logging.error("无法确定患者序号")
+                return False
+            
+            print(f"患者序号: {patient_id}")
+            
+            output_dir = Path(output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            
+            success_count = 0
+            
+            # 使用统一基准帧处理每个表情视频
+            for video_path in video_paths:
+                video_path_obj = Path(video_path)
+                video_name = video_path_obj.stem
+                
+                print(f"\n处理视频: {video_name}")
+                
+                # 从文件名确定表情类型
+                expression_type = self._get_expression_from_filename(video_name)
+                if not expression_type:
+                    logging.warning(f"无法从文件名 {video_name} 确定表情类型，跳过")
+                    continue
+                
+                print(f"检测到表情类型: {expression_type}")
+                
+                # 使用统一基准帧分析视频
+                baseline_frame, expression_peak_frames = self._analyze_single_expression_video(
+                    video_path, expression_type, unified_baseline_frame)
+                
+                if not baseline_frame:
+                    logging.warning(f"视频 {video_name} 未找到合适的基准帧，跳过")
+                    continue
+                
+                if not expression_peak_frames:
+                    logging.warning(f"视频 {video_name} 未找到表情峰值帧，跳过")
+                    continue
+                
+                # 保存基准图和表情图片
+                self._save_images_new_structure(
+                    video_path, baseline_frame, expression_peak_frames, 
+                    output_dir, video_name, expression_type, patient_id, score_df)
+                
+                success_count += 1
+            
+            print(f"\n患者 {patient_id} 处理完成，成功处理 {success_count}/{len(video_paths)} 个视频")
+            return success_count > 0
+            
+        except Exception as e:
+            logging.error(f"处理患者视频时出错: {e}")
+            return False
     
     def _save_images_new_structure(self, video_path, baseline_frame, expression_peak_frames, 
                                    output_dir, video_name, expression_type, patient_id, score_df):
@@ -346,7 +503,13 @@ class VideoProcessor:
         print(f"{expression_type} 图片保存完成，共 {len(expression_peak_frames)} 张")
     
     def process_single_video(self, video_path: str, output_dir: str, score_df: pd.DataFrame = None) -> bool:
-        """处理单个视频文件（新结构：每个视频对应一个表情动作）"""
+        """
+        处理单个视频文件（兼容性方法）
+        
+        注意：此方法使用单个视频的第一帧作为基准帧。
+        推荐使用 process_patient_videos() 方法来处理一个患者的所有表情视频，
+        该方法会选择最佳的统一基准帧。
+        """
         try:
             video_path_obj = Path(video_path)
             video_name = video_path_obj.stem
