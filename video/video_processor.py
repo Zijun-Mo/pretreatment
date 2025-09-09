@@ -128,7 +128,8 @@ class VideoProcessor:
                         'timestamp_s': timestamp_s,
                         'frame': frame.copy(),
                         'rgb_frame': rgb_frame.copy(),
-                        'detection_result': detection_result
+                        'detection_result': detection_result,
+                        'landmarks': detection_result.face_landmarks[0]
                     }
                     all_frames_data.append(frame_info)
                 
@@ -384,8 +385,6 @@ class VideoProcessor:
                 frame_info['frame'], frame_info['detection_result'])
             
             img_dir = output_dir / f"{expression_type}" / f"{new_file_id}_{i+1:03d}"
-            img_path = img_dir / "facial_image.jpg"
-            points_img_path = img_dir / "facial_image_points.jpg"
             
             # 确保目录存在
             img_dir.mkdir(parents=True, exist_ok=True)
@@ -431,28 +430,18 @@ class VideoProcessor:
                 flow_bgr_112 = cv2.resize(flow_bgr, (112, 112), interpolation=cv2.INTER_LINEAR)
                 optical_flow_path = img_dir / "optical_flow.jpg"
                 cv2.imwrite(str(optical_flow_path), flow_bgr_112)
+                    
+                # 提取和保存表情图特征点张量
+                expression_landmarks = frame_info['landmarks']
+                expression_landmarks_array = np.array([[lm.x, lm.y, lm.z] for lm in expression_landmarks])
+                expression_landmarks_path = img_dir / "expression_landmarks.npy"
+                np.save(str(expression_landmarks_path), expression_landmarks_array)
                 
-                # 保存表情图和表情点图（resize到112x112）
-                rgb_image = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2RGB)
-                rgb_image_112 = cv2.resize(rgb_image, (112, 112), interpolation=cv2.INTER_LINEAR)
-                pil_image = Image.fromarray(rgb_image_112)
-                pil_image.save(str(img_path), 'JPEG', quality=95)
-                
-                points_img_112 = cv2.resize(points_frame, (112, 112), interpolation=cv2.INTER_NEAREST)
-                points_img = Image.fromarray(points_img_112)
-                points_img.save(str(points_img_path), 'JPEG', quality=95)
-                
-                # 保存基准图和基准点图到该目录
-                baseline_img_path = img_dir / "facial_image_baseline.jpg"
-                baseline_points_img_path = img_dir / "facial_image_baseline_points.jpg"
-                baseline_rgb = cv2.cvtColor(roi_baseline_frame, cv2.COLOR_BGR2RGB) if len(roi_baseline_frame.shape) == 3 else roi_baseline_frame
-                baseline_rgb_112 = cv2.resize(baseline_rgb, (112, 112), interpolation=cv2.INTER_LINEAR)
-                baseline_pil = Image.fromarray(baseline_rgb_112)
-                baseline_pil.save(str(baseline_img_path), 'JPEG', quality=95)
-                
-                baseline_points_112 = cv2.resize(points_baseline_frame, (112, 112), interpolation=cv2.INTER_NEAREST)
-                baseline_points_pil = Image.fromarray(baseline_points_112)
-                baseline_points_pil.save(str(baseline_points_img_path), 'JPEG', quality=95)
+                # 保存基准图特征点张量
+                baseline_landmarks = baseline_frame['landmarks']
+                baseline_landmarks_array = np.array([[lm.x, lm.y, lm.z] for lm in baseline_landmarks])
+                baseline_landmarks_path = img_dir / "baseline_landmarks.npy"
+                np.save(str(baseline_landmarks_path), baseline_landmarks_array)
                 
                 # 保存评分信息
                 if score_df is not None:
@@ -497,7 +486,7 @@ class VideoProcessor:
                 
             except Exception as e:
                 print(f"保存图片失败: {e}")
-                logging.error(f"保存图片失败: {img_path}, 错误: {e}")
+                logging.error(f"保存图片失败: {img_dir}, 错误: {e}")
                 continue
         
         print(f"{expression_type} 图片保存完成，共 {len(expression_peak_frames)} 张")

@@ -11,11 +11,12 @@ class Config:
     """配置类"""
     
     # MediaPipe模型路径
-    MODEL_PATH = r'C:\picture\face_landmarker_v2_with_blendshapes.task'
+    # MediaPipe模型路径
+    MODEL_PATH = '/home/jun/picture/face_landmarker_v2_with_blendshapes.task'
     
     # 默认输入输出目录
-    INPUT_DIR = r'C:\picture\第二批'
-    OUTPUT_DIR = r'C:\picture\output'
+    INPUT_DIR = '/home/jun/picture/第二批'
+    OUTPUT_DIR = '/home/jun/picture/output'
     
     # 支持的视频格式
     VIDEO_EXTENSIONS = {'.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm'}
