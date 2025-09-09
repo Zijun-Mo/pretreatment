@@ -194,6 +194,9 @@ class VideoProcessor:
                 min_idx = i
         
         baseline_frame_info = neutral_frames_data[min_idx].copy()
+        # 添加landmarks字段到baseline_frame_info
+        baseline_frame_info['landmarks'] = baseline_frame_info['detection_result'].face_landmarks[0]
+        baseline_frame_info['blendshapes'] = baseline_frame_info['detection_result'].face_blendshapes[0]
         print(f"基准帧已找到: 帧号 {baseline_frame_info['frame_number']} (中性值: {baseline_frame_info['expressions']['neutral']:.3f}, 变化率窗口均值: {min_avg:.5f})")
         
         # 阶段二：使用基准帧地标重新计算表情并找到峰值
@@ -297,13 +300,11 @@ class VideoProcessor:
                 # 保存roi区域和点图
                 roi_frame, points_frame = self.analysis_engine.process_frame_for_roi(frame_info['frame'], frame_info['detection_result'])
                 img_dir = output_dir / f"{expr_key}" / f"{video_name}_{i+1:03d}"
-                img_path = img_dir / "facial_image.jpg"
-                points_img_path = img_dir / "facial_image_points.jpg"
                 # 确保目录存在
                 img_dir.mkdir(parents=True, exist_ok=True)
-                # 使用PIL保存图片
+                # 保存光流图和特征点张量
                 try:
-                    # 光流对比（Farneback）
+                    # 计算光流（Farneback）
                     # 先缩放到相同大小
                     if roi_frame.shape[:2] != roi_baseline_frame.shape[:2]:
                         roi_frame_resized = cv2.resize(roi_frame, (roi_baseline_frame.shape[1], roi_baseline_frame.shape[0]))
@@ -336,26 +337,23 @@ class VideoProcessor:
                     hsv[...,2] = mag_norm.astype(np.uint8)
                     flow_bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
                     flow_bgr_112 = cv2.resize(flow_bgr, (112, 112), interpolation=cv2.INTER_LINEAR)
+                    
+                    # 保存光流图
                     optical_flow_path = img_dir / "optical_flow.jpg"
                     cv2.imwrite(str(optical_flow_path), flow_bgr_112)
-                    # 保存表情图和表情点图（resize到112x112）
-                    rgb_image = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2RGB)
-                    rgb_image_112 = cv2.resize(rgb_image, (112, 112), interpolation=cv2.INTER_LINEAR)
-                    pil_image = Image.fromarray(rgb_image_112)
-                    pil_image.save(str(img_path), 'JPEG', quality=95)
-                    points_img_112 = cv2.resize(points_frame, (112, 112), interpolation=cv2.INTER_NEAREST)
-                    points_img = Image.fromarray(points_img_112)
-                    points_img.save(str(points_img_path), 'JPEG', quality=95)
-                    # 保存基准图和基准点图到该目录（resize到112x112）
-                    baseline_img_path = img_dir / "facial_image_baseline.jpg"
-                    baseline_points_img_path = img_dir / "facial_image_baseline_points.jpg"
-                    baseline_rgb = cv2.cvtColor(roi_baseline_frame, cv2.COLOR_BGR2RGB) if len(roi_baseline_frame.shape) == 3 else roi_baseline_frame
-                    baseline_rgb_112 = cv2.resize(baseline_rgb, (112, 112), interpolation=cv2.INTER_LINEAR)
-                    baseline_pil = Image.fromarray(baseline_rgb_112)
-                    baseline_pil.save(str(baseline_img_path), 'JPEG', quality=95)
-                    baseline_points_112 = cv2.resize(points_baseline_frame, (112, 112), interpolation=cv2.INTER_NEAREST)
-                    baseline_points_pil = Image.fromarray(baseline_points_112)
-                    baseline_points_pil.save(str(baseline_points_img_path), 'JPEG', quality=95)
+                    
+                    # 提取和保存表情图特征点张量
+                    expression_landmarks = frame_info['landmarks']
+                    expression_landmarks_array = np.array([[lm.x, lm.y, lm.z] for lm in expression_landmarks])
+                    expression_landmarks_path = img_dir / "expression_landmarks.npy"
+                    np.save(str(expression_landmarks_path), expression_landmarks_array)
+                    
+                    # 保存基准图特征点张量
+                    baseline_landmarks = baseline_frame['landmarks']
+                    baseline_landmarks_array = np.array([[lm.x, lm.y, lm.z] for lm in baseline_landmarks])
+                    baseline_landmarks_path = img_dir / "baseline_landmarks.npy"
+                    np.save(str(baseline_landmarks_path), baseline_landmarks_array)
+                    
                     # 保存xlsx文件line_keys行G列（每个表情保存对应的两行G列为json）
                     if xlsx_df is not None:
                         expr_idx = self.expression_keys.index(expr_key)
@@ -377,9 +375,17 @@ class VideoProcessor:
                                 json.dump(g_dict, f, ensure_ascii=False, indent=2)
                         except Exception as e:
                             print(f"保存G列json失败: {e}")
+                    else:
+                        print("未找到xlsx文件，跳过保存G列数据")
+                    
+                    print(f"已保存文件:")
+                    print(f"  - 光流图: {optical_flow_path}")
+                    print(f"  - 表情特征点: {expression_landmarks_path}")
+                    print(f"  - 基准特征点: {baseline_landmarks_path}")
+                    
                 except Exception as e:
-                    print(f"保存图片失败: {e}")
-                    logging.error(f"保存图片失败: {img_path}, 错误: {e}")
+                    print(f"保存文件失败: {e}")
+                    logging.error(f"保存文件失败: {img_dir}, 错误: {e}")
                     continue
             print(f"{expr_key} 图片保存完成，共 {len(expr_frames)} 张")
         return
