@@ -123,7 +123,7 @@ main.py
 
 ### 1. 安装依赖
 ```bash
-pip install mediapipe opencv-python numpy pillow matplotlib
+pip install mediapipe opencv-python numpy pillow matplotlib pandas
 ```
 
 ### 2. 配置路径
