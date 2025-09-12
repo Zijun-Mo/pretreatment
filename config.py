@@ -15,7 +15,7 @@ class Config:
     MODEL_PATH = '/home/jun/picture/face_landmarker_v2_with_blendshapes.task'
     
     # 默认输入输出目录
-    INPUT_DIR = '/home/jun/picture/第二批'
+    INPUT_DIR = '/home/jun/picture/测试集'
     OUTPUT_DIR = '/home/jun/picture/output'
     
     # 支持的视频格式
@@ -29,7 +29,7 @@ class Config:
     PEAK_THRESHOLD = 0.9  # 峰值的90%作为阈值
     
     # 文件命名参数
-    FILE_ID_OFFSET = 20  # 患者序号加上此偏移量作为文件ID
+    FILE_ID_OFFSET = 50  # 患者序号加上此偏移量作为文件ID
     
     # 日志配置
     LOG_LEVEL = 'INFO'

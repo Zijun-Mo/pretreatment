@@ -18,6 +18,19 @@ from analysis.facial_analysis_engine import FacialAnalysisEngine
 from analysis.expression_analyzer import ExpressionAnalyzer
 
 
+def safe_json_serialize(obj):
+    """安全的JSON序列化函数，处理numpy类型"""
+    if isinstance(obj, (np.integer, np.int64, np.int32)):
+        return int(obj)
+    elif isinstance(obj, (np.floating, np.float64, np.float32)):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif pd.isna(obj):
+        return None
+    return obj
+
+
 class VideoProcessor:
     """视频处理器"""
     
@@ -448,11 +461,11 @@ class VideoProcessor:
                     cols = self.expression_col_mapping[expression_type]
                     g_dict = {}
                     
-                    # 查找患者对应的行（患者序号在第1列，从第3行开始是数据）
+                    # 查找患者对应的行（患者序号在第1列，从第2行开始是数据）
                     patient_row_idx = None
                     patient_num = int(patient_id)
                     
-                    for idx in range(1, len(score_df)):  # 从第3行开始查找（跳过表头）
+                    for idx in range(len(score_df)):  # 从第1行开始查找（包含表头后的数据行）
                         try:
                             if pd.notna(score_df.iloc[idx, 0]) and int(score_df.iloc[idx, 0]) == patient_num:
                                 patient_row_idx = idx
@@ -463,12 +476,16 @@ class VideoProcessor:
                     if patient_row_idx is not None:
                         try:
                             g_val = score_df.iloc[patient_row_idx, cols['dynamic']]  # 动态评分列
+                            # 使用安全序列化函数转换类型
+                            g_val = safe_json_serialize(g_val)
                         except Exception as e:
                             g_val = None
                         g_dict['dynamics'] = g_val
                         
                         try:
                             g_val = score_df.iloc[patient_row_idx, cols['synkinesis']]  # 联动评分列
+                            # 使用安全序列化函数转换类型
+                            g_val = safe_json_serialize(g_val)
                         except Exception as e:
                             g_val = None
                         g_dict['synkinesis'] = g_val
