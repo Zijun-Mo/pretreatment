@@ -12,7 +12,7 @@ class Config:
     
     # MediaPipe模型路径
     # MediaPipe模型路径
-    MODEL_PATH = '/home/jun/picture/face_landmarker_v2_with_blendshapes.task'
+    MODEL_PATH = r'model\face_landmarker_v2_with_blendshapes.task'
     
     # 默认输入输出目录
     INPUT_DIR = '/home/jun/picture/测试集'
